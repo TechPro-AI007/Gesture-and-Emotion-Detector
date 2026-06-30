@@ -1,82 +1,112 @@
 import cv2
 import mediapipe as mp
-import math
 
-# Initialize MediaPipe Face Mesh
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(
-    max_num_faces=1,
-    refine_landmarks=True,
-    min_detection_confidence=0.6,
-    min_tracking_confidence=0.6
+# Initialize MediaPipe Hands
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(
+    static_image_mode=False,
+    max_num_hands=1,
+    min_detection_confidence=0.7,
+    min_tracking_confidence=0.7
 )
+mp_draw = mp.solutions.drawing_utils
 
+# Open Webcam
 cap = cv2.VideoCapture(0)
 
 while cap.isOpened():
     success, frame = cap.read()
     if not success:
+        print("Ignoring empty camera frame.")
         continue
 
+    # Flip horizontally for a mirror effect
     frame = cv2.flip(frame, 1)
     h, w, _ = frame.shape
+    
+    # Convert BGR to RGB
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = face_mesh.process(rgb_frame)
+    results = hands.process(rgb_frame)
 
-    if results.multi_face_landmarks:
-        for face_landmarks in results.multi_face_landmarks:
-            lm = face_landmarks.landmark
+    if results.multi_hand_landmarks:
+        for hand_landmarks in results.multi_hand_landmarks:
+            # Draw lines on the hand
+            mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
             
-            def get_dist(p1, p2):
-                x1, y1 = int(lm[p1].x * w), int(lm[p1].y * h)
-                x2, y2 = int(lm[p2].x * w), int(lm[p2].y * h)
-                return math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-
-            # --- CALCULATE DISTANCES ---
-            lip_width = get_dist(61, 291)     # Left to right lip corners
-            lip_height = get_dist(13, 14)     # Inner top lip to inner bottom lip
-            eye_height = get_dist(159, 145)   # Top to bottom of right eye
+            lm = hand_landmarks.landmark
             
-            # Distance from inner eyebrow to the bridge of the nose
-            eyebrow_to_nose = get_dist(70, 6) 
-
-            # --- THE SECRET SAUCE: RATIOS ---
-            # Using lip_width as a baseline prevents distance/zoom issues
-            mouth_open_ratio = lip_height / max(1.0, lip_width)
-            smile_ratio = lip_width / max(1.0, eye_height)
-
-            # Default state
-            emotion = "NEUTRAL"
-            box_color = (255, 255, 0) # Cyan
-
-            # --- CALIBRATED EMOTION LOGIC ---
+            # 1. Determine if fingers are completely straight (Tip is ABOVE the joint)
+            index_straight  = lm[8].y < lm[6].y
+            middle_straight = lm[12].y < lm[10].y
+            ring_straight   = lm[16].y < lm[14].y
+            pinky_straight  = lm[20].y < lm[18].y
             
-            # 1. SURPRISED: Mouth drops open significantly (height is large compared to width)
-            if mouth_open_ratio > 0.45:
-                emotion = "SURPRISED!"
-                box_color = (0, 255, 255) # Yellow
+            # Determine if fingers are folded (Tip is BELOW the joint)
+            index_folded  = lm[8].y > lm[6].y
+            middle_folded = lm[12].y > lm[10].y
+            ring_folded   = lm[16].y > lm[14].y
+            pinky_folded  = lm[20].y > lm[18].y
+
+            # 2. Track Thumb positions
+            thumb_upright   = lm[4].y < lm[2].y and (lm[4].y < lm[3].y)
+            thumb_downward  = lm[4].y > lm[2].y and (lm[4].y > lm[3].y)
+
+            # Variables to store what bubble text and color to show
+            gesture_text = ""
+            bubble_color = (0, 0, 0) # Default Black
+            
+            # --- GESTURE LOGIC ---
+            
+            # A. THUMBS UP
+            if thumb_upright and index_folded and middle_folded and ring_folded and pinky_folded:
+                gesture_text = "GOOD!"
+                bubble_color = (0, 200, 0) # Green
                 
-            # 2. HAPPY: Mouth stretches wide horizontally
-            elif smile_ratio > 5.5:
-                emotion = "HAPPY :D"
-                box_color = (0, 255, 0) # Green
+            # B. THUMBS DOWN
+            elif thumb_downward and index_folded and middle_folded and ring_folded and pinky_folded:
+                gesture_text = "BAD!"
+                bubble_color = (0, 0, 255) # Red
+
+            # C. HIGH-FIVE (All fingers out straight)
+            elif index_straight and middle_straight and ring_straight and pinky_straight:
+                gesture_text = "HIGH FIVE!"
+                bubble_color = (255, 128, 0) # Orange
+
+            # D. PUNCH (All fingers completely curled into the palm)
+            elif index_folded and middle_folded and ring_folded and pinky_folded and not thumb_upright:
+                gesture_text = "PUNCH!"
+                bubble_color = (0, 0, 100) # Dark Maroon
+
+            # E. VICTORY / PEACE (Index and Middle straight, others folded)
+            elif index_straight and middle_straight and ring_folded and pinky_folded:
+                gesture_text = "VICTORY!"
+                bubble_color = (200, 0, 200) # Purple
+
+            # F. OK SIGN (Index touches Thumb, others up. Simple check: Middle, Ring, Pinky are straight)
+            elif index_folded and middle_straight and ring_straight and pinky_straight:
+                gesture_text = "OK!"
+                bubble_color = (0, 255, 255) # Yellow
+
+            # --- DRAW THE BUBBLE ---
+            if gesture_text != "":
+                # Get the wrist coordinate (landmark 0) to place a big floating bubble over the hand
+                wrist_x = int(lm[0].x * w)
+                wrist_y = int(lm[0].y * h)
                 
-            # 3. SAD: Corners of mouth drop, or eyebrows furrow downward/closer to nose
-            elif eyebrow_to_nose < 22.0 and mouth_open_ratio < 0.15:
-                emotion = "SAD :("
-                box_color = (255, 0, 0) # Blue
+                # Floating bubble positioned above the wrist/hand area
+                bubble_center = (wrist_x, wrist_y - 180)
+                
+                # Draw the colored bubble background
+                cv2.circle(frame, bubble_center, 65, bubble_color, -1)
+                
+                # Add text centered inside the bubble
+                cv2.putText(frame, gesture_text, (bubble_center[0] - 50, bubble_center[1] + 8), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-            # --- DRAW BOUNDING BOX ---
-            all_x = [int(landmark.x * w) for landmark in face_landmarks.landmark]
-            all_y = [int(landmark.y * h) for landmark in face_landmarks.landmark]
-            x_min, x_max = min(all_x), max(all_x)
-            y_min, y_max = min(all_y), max(all_y)
+    # Display the output
+    cv2.imshow('Multi-Gesture Bubble Detector', frame)
 
-            cv2.rectangle(frame, (x_min - 10, y_min - 20), (x_max + 10, y_max + 10), box_color, 2)
-            cv2.putText(frame, emotion, (x_min, y_min - 30), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, box_color, 2)
-
-    cv2.imshow('Face Emotion Detector', frame)
+    # Break loop if 'q' is pressed
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
